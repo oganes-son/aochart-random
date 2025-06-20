@@ -5,10 +5,12 @@ import pandas as pd
 import re
 import traceback
 
+# Vercel環境では、Flaskはプロジェクトのルートからの相対パスで
+# templatesフォルダなどを自動的に見つけるため、パスの指定は不要です。
 app = Flask(__name__)
 CORS(app)
 
-# --- ▼▼▼【修正点】Excelファイルをローカルではなく、GitHubの公開URLから直接読み込む ▼▼▼ ---
+# --- ▼▼▼【修正点】Excelファイルをローカルではなく、GitHubの公開URLから直接読み込む ▼▼▼
 # これにより、Vercelのデプロイサイズ制限とファイル形式エラーを回避します。
 chart_file_url = 'https://raw.githubusercontent.com/oganes-son/random_aochart/main/aochart.xlsx'
 ex_file_url = 'https://raw.githubusercontent.com/oganes-son/random_aochart/main/aochart_ex.xlsx'
@@ -134,6 +136,7 @@ problem_formatter = ProblemFormatter()
 
 @app.route('/')
 def index():
+    # Vercelではプロジェクトルートからの相対パスでテンプレートを見つける
     return render_template('index.html')
 
 @app.route('/get_problem', methods=['POST'])
