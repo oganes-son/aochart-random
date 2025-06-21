@@ -1,33 +1,38 @@
 import os
 from flask import Flask, render_template, jsonify, request
 from flask_cors import CORS
-import json # pandasの代わりにjsonをインポート
+import pandas as pd
 import re
 import traceback
-import random # randomをインポート
+import random
 
 # Flaskアプリを初期化
 app = Flask(__name__)
 CORS(app)
 
-# --- JSONファイルを読み込み ---
-chart_data = []
-ex_data = []
+# --- 2つのExcelファイルを読み込み、列名を明示的に設定 ---
+df_chart = None
+df_ex = None
+# Excelの列番号とプログラムで使う名前の対応表
+column_mapping = {
+    1: 'unit_name', 2: 'difficulty', 3: 'problem_number', 4: 'problem_text', 
+    5: 'image_flag', 6: 'image_number'
+}
 
 try:
-    # このファイル(app.py)と同じ階層にあるJSONファイルを読み込む
-    with open('aochart.json', 'r', encoding='utf-8') as f:
-        chart_data = json.load(f)
-    print("Chart JSON file loaded successfully.")
+    # このファイル(app.py)と同じ階層にあるExcelファイルを読み込む
+    df_chart = pd.read_excel('aochart.xlsx', dtype=str, header=None, engine='openpyxl')
+    df_chart = df_chart.rename(columns=column_mapping)
+    print("Chart Excel file loaded successfully.")
 except Exception as e:
-    print(f"Failed to load chart JSON file: {e}")
+    print(f"Failed to load chart Excel file: {e}")
 
 try:
-    with open('aochart_ex.json', 'r', encoding='utf-8') as f:
-        ex_data = json.load(f)
-    print("Exercise JSON file loaded successfully.")
+    df_ex = pd.read_excel('aochart_ex.xlsx', dtype=str, header=None, engine='openpyxl')
+    df_ex = df_ex.rename(columns=column_mapping)
+    print("Exercise Excel file loaded successfully.")
 except Exception as e:
-    print(f"Failed to load exercise JSON file: {e}")
+    print(f"Failed to load exercise Excel file: {e}")
 
 
 def process_latex_text(problem_text):
@@ -120,29 +125,24 @@ def get_problem():
         raw_difficulties = data.get('difficulties', [])
         selected_difficulties = [int(d) for d in raw_difficulties if isinstance(d, (int, str)) and str(d).isdigit()]
         if not selected_units or not selected_difficulties: return jsonify(error="単元と難易度を少なくとも1つずつ選択してください。")
-        
-        target_data = []
-        if selected_book in ['all', 'chart'] and chart_data:
-            for item in chart_data: item['source'] = 'chart'
-            target_data.extend(chart_data)
-        if selected_book in ['all', 'ex'] and ex_data:
-            for item in ex_data: item['source'] = 'ex'
-            target_data.extend(ex_data)
-        if not target_data: return jsonify(error="選択可能な問題集のデータが見つかりません。")
-        
-        matching_rows = [row for row in target_data if row.get('unit_name') in selected_units and int(row.get('difficulty', 0)) in selected_difficulties]
-        
-        if not matching_rows: return jsonify(error="選択した単元と難易度に合致する問題が見つかりません。")
-        
-        random_row = random.choice(matching_rows)
-        unit_name = random_row.get('unit_name')
-        example_number = random_row.get('problem_number')
+        df_list = []
+        if selected_book in ['all', 'chart'] and df_chart is not None:
+            temp_chart = df_chart.copy(); temp_chart['source'] = 'chart'; df_list.append(temp_chart)
+        if selected_book in ['all', 'ex'] and df_ex is not None:
+            temp_ex = df_ex.copy(); temp_ex['source'] = 'ex'; df_list.append(temp_ex)
+        if not df_list: return jsonify(error="選択可能な問題集のデータが見つかりません。")
+        target_df = pd.concat(df_list, ignore_index=True)
+        target_df['difficulty'] = pd.to_numeric(target_df['difficulty'], errors='coerce').fillna(0).astype(int)
+        matching_rows = target_df[(target_df['unit_name'].isin(selected_units)) & (target_df['difficulty'].isin(selected_difficulties))]
+        if matching_rows.empty: return jsonify(error="選択した単元と難易度に合致する問題が見つかりません。")
+        random_row = matching_rows.sample(n=1).iloc[0]
+        unit_name, example_number = random_row['unit_name'], random_row['problem_number']
         problem_number_display = f"EXERCISE {example_number}" if random_row.get('source') == 'ex' else str(example_number)
-        raw_problem_text = process_latex_text(random_row.get('problem_text'))
+        raw_problem_text = process_latex_text(random_row['problem_text'])
         formatted_equation = problem_formatter.format(raw_problem_text)
-        image_flag = int(random_row.get('image_flag', 0))
-        image_number = int(random_row.get('image_number', 0)) if str(random_row.get('image_number')).isdigit() else None
-        difficulty = int(random_row.get('difficulty', 0))
+        image_flag = int(random_row['image_flag']) if pd.notna(random_row['image_flag']) else 0
+        image_number = int(random_row['image_number']) if pd.notna(random_row['image_number']) else None
+        difficulty = int(random_row['difficulty']) if pd.notna(random_row['difficulty']) else 0
         return jsonify(unit_name=unit_name, problem_number=problem_number_display, equation=formatted_equation, image_flag=image_flag, image_number=image_number, difficulty=difficulty)
     except Exception as e:
         app.logger.error(f"Error in /get_problem: {e}\n{traceback.format_exc()}"); return jsonify(error="サーバー側で予期せぬエラーが発生しました。", details=str(e)), 500
@@ -152,23 +152,18 @@ def get_selected_problem():
     try:
         book_type = request.args.get('book', 'chart')
         selected_unit, problem_number = request.args.get('unit'), request.args.get('problem_number')
-        target_data = ex_data if book_type == 'ex' else chart_data
-        if not target_data: return jsonify(error=f"問題データ({book_type})が読み込まれていません。")
+        target_df = df_ex if book_type == 'ex' else df_chart
+        if target_df is None: return jsonify(error=f"問題データ({book_type})が読み込まれていません。")
         if not selected_unit or not problem_number: return jsonify(error="単元と問題番号が指定されていません。")
-        
-        found_row = None
-        for row in target_data:
-            if row.get('unit_name') == selected_unit and str(row.get('problem_number')) == str(problem_number):
-                found_row = row
-                break
-        
-        if not found_row: return jsonify(error=f"問題が見つかりません: {selected_unit} - {problem_number}")
-        
-        raw_latex_data = process_latex_text(found_row.get('problem_text'))
+        target_df['problem_number'] = target_df['problem_number'].astype(str)
+        row = target_df[(target_df['unit_name'] == selected_unit) & (target_df['problem_number'] == str(problem_number))]
+        if row.empty: return jsonify(error=f"問題が見つかりません: {selected_unit} - {problem_number}")
+        row = row.iloc[0]
+        raw_latex_data = process_latex_text(row['problem_text'])
         formatted_equation = problem_formatter.format(raw_latex_data)
-        image_flag = int(found_row.get('image_flag', 0))
-        image_number = int(found_row.get('image_number', 0)) if str(found_row.get('image_number')).isdigit() else None
-        difficulty = int(found_row.get('difficulty', 0))
+        image_flag = int(row['image_flag']) if pd.notna(row['image_flag']) else 0
+        image_number = int(row['image_number']) if pd.notna(row['image_number']) else None
+        difficulty = int(row['difficulty']) if pd.notna(row['difficulty']) else 0
         return jsonify(problem_number=problem_number, equation=formatted_equation, difficulty=difficulty, image_flag=image_flag, image_number=image_number, row_number=-1)
     except Exception as e:
         app.logger.error(f"Error in /get_selected_problem: {e}\n{traceback.format_exc()}"); return jsonify(error="サーバー側で予期せぬエラーが発生しました。", details=str(e)), 500
